@@ -11,6 +11,7 @@ export const PageNotFound = {
     <div class="errorWrap">
       <h4>Page not Found</h4>
       <p>{{ config.pageNotFoundMsg }}</p>
+      <p><router-link to="/_console">Abrir o console de teste manual (QA)</router-link></p>
     </div>
     <Footer />
   `,

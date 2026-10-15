@@ -61,3 +61,29 @@ fetch chain: the clone "POSTs" to a same-origin mock path and shows "Generating 
 Code...", while an id whose decoded text contains `transaction` shows "Unable to
 read QR code" — the same states the original reaches. No request ever leaves your
 machine except the Vue/Leaflet CDN scripts and OpenStreetMap tiles.
+
+## Manual test console
+
+Open `http://localhost:PORT/#/_console` for a form-driven way to exercise every
+branch of the fetch logic without touching fixture files or devtools:
+
+- Type any text (auto-encoded to base64) or paste an id directly, or pick a preset
+  (valid batch, padding-producing text, a `transaction`-flagged id, a
+  `givaudan`-flagged id, an id with no matching fixture).
+- See the decoded id, detected environment, fallback API host, the padding-flipped
+  id, and the branding/notice flags computed from it — live, as you type.
+- Force `Dist_`/`Geo_` to answer 403 or 404 regardless of what the fixture file
+  actually contains, to drive the padding retry or the POST-fallback path on
+  demand. **This forced status also applies if you then open that id on the normal
+  `#/<id>` screen** — use "Limpar status forçados" to go back to real fixture
+  behavior.
+- Run `fetchGeo` + `fetchDistribution` and read a live request log: method, which
+  mock file/endpoint it hit, the status, whether it was forced, and whether the
+  `Authorization` header was sent (it is, only on the POST fallback — see finding
+  F-2 in the analysis doc).
+
+This console is an addition for QA, not part of the original app — the real app has
+no such screen. It still never calls anything outside `./mock-data/` on the same
+origin; to test the real Koltiva infrastructure you need your own authorized
+tooling (Burp, Postman, etc.) against the hosts listed in the analysis doc,
+independent of this clone.

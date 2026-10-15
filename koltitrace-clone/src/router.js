@@ -1,7 +1,12 @@
 // Mirrors the original router: routes = [catchAll -> PageNotFound, "/:id" -> HomeView].
 // There is no literal "/" route in the original app either.
+//
+// "/_console" is an addition of this clone only (see views/TestConsole.js) — a
+// static path, so vue-router always prefers it over the dynamic "/:id", no
+// matter where it sits in this array.
 import { HomeView } from "./views/HomeView.js";
 import { PageNotFound } from "./views/PageNotFound.js";
+import { TestConsole } from "./views/TestConsole.js";
 
 const { createRouter, createWebHashHistory } = window.VueRouter;
 
@@ -11,6 +16,11 @@ export const router = createRouter({
   // CloudFront/S3 SPA rewrite.
   history: createWebHashHistory(),
   routes: [
+    {
+      path: "/_console",
+      name: "test-console",
+      component: TestConsole,
+    },
     {
       path: "/:catchAll(.*)",
       name: "not-found",
