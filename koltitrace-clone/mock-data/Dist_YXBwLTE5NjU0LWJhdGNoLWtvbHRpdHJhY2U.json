@@ -1,0 +1,8 @@
+{
+  "data": {
+    "data": {
+      "parent": { "lat": -1.6, "lng": 116.5, "label": "Example cooperative (origin) — mock data" },
+      "child": { "lat": -6.2, "lng": 106.8, "label": "Example processing facility (destination) — mock data" }
+    }
+  }
+}
