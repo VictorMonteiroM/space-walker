@@ -1,33 +1,48 @@
 // Reconstructed from the shipped assets/HomeView.*.js (minified names Sn, bo,
 // ut, dt, Pn, un, Tl, vo in the original — renamed here for readability).
-// This is the exact fetch strategy observed in the bundle:
+// Control flow verified against the original and exercised in a browser
+// (see docs/koltitrace-reverse-engineering.md, "Execução e observações").
 //
-//   1. Decode the route id from base64 ("transaction" in the decoded text
-//      flags a QR meant for a different app and shows a dedicated message,
-//      but does not stop the fetch attempt).
-//   2. Try the CloudFront JSON object first:
-//        {cloudfrontURL}/koltitrace-lite/{env}/{prefix}{id}.json?timestamp=...
-//      prefix is "Dist_" for distribution data or "Geo_" for the map's
-//      language code.
-//   3. On HTTP 403, retry once with the id's base64 padding flipped (strip a
-//      trailing "=" or add "==") — the original app tries both paddings
-//      before giving up, which suggests the id is stored in S3 under a key
-//      that does not always match the padding the frontend computes.
-//   4. If that also fails, fall back to the REST API:
-//        GET {apiProduction}/queue/distribution-geolocation?uid={id}
-//      sent with the static Authorization header from config.js.
+//   fetchObject(env, id, prefix)                         (Sn / bo)
+//     1. GET {cloudfrontURL}/koltitrace-lite/{env}/{prefix}{id}.json?timestamp=...
+//     2. On HTTP 403 (S3 answers 403 for a key that does not exist), retry once
+//        with the padding flipped: strip ALL trailing "=" if present, otherwise
+//        append "==".
+//     3. Any remaining failure goes to onMissing(id)    (un):
+//          - decoded id contains "transaction" -> "Unable to read QR code" modal
+//          - otherwise -> requestGeneration(id)          (Pn)
 //
-// None of this clone's fetches are wired to the real hosts — see fetchJson()
-// in http.js, which points at same-origin stub endpoints instead.
+//   requestGeneration(id)                                (Pn)
+//     NOT a data fetch. It POSTs an empty body to
+//       {api}/queue/distribution-geolocation?uid={id}
+//     with the static Authorization header, shows a full-screen
+//     "Generating QR Code..." notice, and ignores the response (errors are only
+//     logged). The page never reads the generated data back; the user is
+//     expected to come back later, when the JSON object exists in S3.
+//
+// After onMissing() the original returns undefined, so the caller crashes with
+// a TypeError that Sn rethrows as "Failed to get language code." — mirrored here
+// by throwing a typed error so the view can render the matching state.
 
 import { config } from "./config.js";
-import { getJson, handleThirdPartyRejection } from "./http.js";
+import { getJson, postEmpty } from "./http.js";
 
 export function determineEnvironmentKey() {
   const origin = window.location.origin;
   if (origin === config.envProduction) return "prod";
   if (origin === config.envBastionStaging) return "staging";
   return "devel"; // includes envBastionDevelopment and any unrecognized origin
+}
+
+// The original selects the API host by origin, with the development host as
+// the fallback for anything else.
+export function apiBaseForOrigin() {
+  const origin = window.location.origin;
+  const byOrigin = {
+    [config.envProduction]: config.apiProduction,
+    [config.envBastionStaging]: config.apiBastionStaging,
+  };
+  return byOrigin[origin] || config.apiBastionDevelopment;
 }
 
 function b64DecodeSafe(value) {
@@ -42,9 +57,7 @@ export function decodedIdIncludes(id, needle) {
   return b64DecodeSafe(id).includes(needle);
 }
 
-function objectPath(envKey, prefix, id) {
-  return `/koltitrace-lite/${envKey}/${prefix}${id}.json`;
-}
+const objectPath = (envKey, prefix, id) => `/koltitrace-lite/${envKey}/${prefix}${id}.json`;
 
 function withQuery(base, path, params = {}) {
   const qs = Object.keys(params)
@@ -53,57 +66,54 @@ function withQuery(base, path, params = {}) {
   return `${base}${path}${qs ? `?${qs}` : ""}`;
 }
 
-async function fetchFromApiFallback(id) {
-  const url = `${config.apiProduction}/queue/distribution-geolocation?uid=${id}`;
-  return getJson(url, { Authorization: config.authorization });
+// Original: strip every trailing "=" when the id has padding, else append "==".
+export function flipPadding(id) {
+  return id.endsWith("=") ? id.replace(/=+$/, "") : `${id}==`;
 }
 
-async function fetchFromCloudFront(envKey, id, prefix) {
-  const timestamp = Date.now();
+export class FlowError extends Error {
+  constructor(kind, message) {
+    super(message);
+    this.kind = kind; // "unreadable" | "generating"
+  }
+}
+
+async function requestGeneration(id) {
+  const url = `${apiBaseForOrigin()}/queue/distribution-geolocation?uid=${id}`;
   try {
-    const path = objectPath(envKey, prefix, id);
-    const url = withQuery(config.cloudfrontURL, path, { timestamp });
-    const res = await getJson(url);
-    if (res.status === 200) return res;
-    throw new Error("non-200 from CloudFront");
+    await postEmpty(url, { Authorization: config.authorization });
+  } catch (err) {
+    console.log("error post data: " + err); // original only logs and moves on
+  }
+  throw new FlowError("generating", config.generateMsg);
+}
+
+async function onMissing(id) {
+  if (decodedIdIncludes(id, "transaction")) {
+    throw new FlowError("unreadable", config.qrCodeScanMessage);
+  }
+  return requestGeneration(id);
+}
+
+async function fetchObject(envKey, id, prefix) {
+  const timestamp = Date.now();
+  const get = (key) => getJson(withQuery(config.cloudfrontURL, objectPath(envKey, prefix, key), { timestamp }));
+  try {
+    return await get(id);
   } catch (err) {
     if (err.status === 403) {
-      const flippedId = id.endsWith("=") ? id.slice(0, -1) : `${id}==`;
       try {
-        const path = objectPath(envKey, prefix, flippedId);
-        const url = withQuery(config.cloudfrontURL, path, { timestamp });
-        const res = await getJson(url);
-        if (res.status === 200) return res;
+        return await get(flipPadding(id));
       } catch {
-        return handleThirdPartyRejection(id);
+        return onMissing(id);
       }
     }
-    return handleThirdPartyRejection(id);
+    return onMissing(id);
   }
 }
 
-/**
- * Mirrors the original Sn(env, id, prefix) / awsDataFetcher. Always attempts
- * the CloudFront object first, regardless of the "transaction" hint, and only
- * falls back to the REST API on repeated failure.
- */
 export async function fetchDistributionOrGeo(id, prefix) {
-  const envKey = determineEnvironmentKey();
-  const looksLikeTransactionQr = decodedIdIncludes(id, "transaction");
-  if (looksLikeTransactionQr) {
-    // The original app fires a SweetAlert "Unable to read QR code" modal here
-    // and keeps going — callers of this function should show the same notice.
-  }
-  try {
-    const res = await fetchFromCloudFront(envKey, id, prefix);
-    return { data: res.data, looksLikeTransactionQr, viaFallbackApi: false };
-  } catch (err) {
-    if (err && err.status === 403) {
-      const res = await fetchFromApiFallback(id);
-      return { data: res.data, looksLikeTransactionQr, viaFallbackApi: true };
-    }
-    throw err;
-  }
+  return fetchObject(determineEnvironmentKey(), id, prefix);
 }
 
 export const fetchDistribution = (id) => fetchDistributionOrGeo(id, "Dist_");

@@ -1,21 +1,19 @@
 // Thin fetch wrapper standing in for the original app's axios instance ("Dt").
 //
 // IMPORTANT: unlike the original bundle, this clone never calls the real
-// qr.koltitrace.com / koltivaapi.com / amazonaws.com hosts. Every request
-// goes to a same-origin "./mock-data/" path so the clone is self-contained
-// and side-effect free. Swap `rewriteToMock` for a real HTTP call only if
-// you intend to point this at infrastructure you are authorized to test.
+// qr.koltitrace.com / koltivaapi.com / amazonaws.com hosts. Every request is
+// rewritten to a same-origin "./mock-data/" path so the clone is self-contained
+// and side-effect free. Point rewriteToMock at real infrastructure only if you
+// are authorized to test it.
 
 function rewriteToMock(url) {
-  // Map "{cloudfront}/koltitrace-lite/{env}/{prefix}{id}.json?..." and the
-  // API fallback URL onto local fixtures so the demo has something to show.
   const u = new URL(url, window.location.origin);
   if (u.pathname.startsWith("/koltitrace-lite/")) {
-    const file = u.pathname.split("/").pop(); // e.g. Dist_<id>.json
-    return `./mock-data/${file}`;
+    // e.g. /koltitrace-lite/prod/Dist_<id>.json -> ./mock-data/Dist_<id>.json
+    return `./mock-data/${u.pathname.split("/").pop()}`;
   }
-  if (u.pathname.endsWith("/distribution-geolocation")) {
-    return "./mock-data/fallback-distribution-geolocation.json";
+  if (u.pathname.endsWith("/queue/distribution-geolocation")) {
+    return `./mock-data/queue-distribution-geolocation?uid=${u.searchParams.get("uid")}`;
   }
   return url;
 }
@@ -31,10 +29,14 @@ export async function getJson(url, headers = {}) {
   throw error;
 }
 
-export function handleThirdPartyRejection(id) {
-  // Mirrors the original un()/Pn() 403-recovery path: give up and surface a
-  // "missing data" style error for the caller to render.
-  const error = new Error(`No data available for id ${id}`);
-  error.status = 404;
-  throw error;
+// Mirrors axios.post(url, null, { headers }) used by the original Pn().
+export async function postEmpty(url, headers = {}) {
+  const target = rewriteToMock(url);
+  const res = await fetch(target, { method: "POST", headers });
+  if (!res.ok) {
+    const error = new Error(`HTTP ${res.status} for ${target}`);
+    error.status = res.status;
+    throw error;
+  }
+  return res;
 }

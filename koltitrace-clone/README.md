@@ -18,8 +18,10 @@ ES modules and Vue 3 / Vue Router from a CDN — no build step required. It repr
 - The two real routes (`/: id` and a catch-all 404 — there is no literal `/` route in
   the original app).
 - The id-decoding and environment-detection logic.
-- The CloudFront-first, API-fallback data-fetch strategy, including the base64
-  padding retry quirk found in the original code.
+- The CloudFront-first data fetch, including the base64 padding retry (strip all
+  trailing `=`, or append `==`) on HTTP 403, and the last-resort **POST** that
+  enqueues generation of the batch file (`/queue/distribution-geolocation?uid=`)
+  with a "Generating QR Code..." notice. The fallback does not return data.
 - The "Unable to read QR code" message path, the Giavudan branding toggle, and the
   footer/404 views.
 - The `config.js` shape (see **Placeholders** below).
@@ -54,7 +56,8 @@ Then open `http://localhost:PORT/#/<base64-id>` — try the base64 of
 `app-19654-batch-koltitrace` to replay the original link's shape:
 `http://localhost:PORT/#/YXBwLTE5NjU0LWJhdGNoLWtvbHRpdHJhY2U`.
 
-Because this clone has no real backend to call, the data fetch will fail and the UI
-will fall through to the same "Unable to read QR code" / missing-data states the
-real app shows when its own fetch chain fails — which is by itself a useful behavior
-check against the original.
+Only the id from the original link has mock data. Any other id falls through the
+fetch chain: the clone "POSTs" to a same-origin mock path and shows "Generating QR
+Code...", while an id whose decoded text contains `transaction` shows "Unable to
+read QR code" — the same states the original reaches. No request ever leaves your
+machine except the Vue/Leaflet CDN scripts and OpenStreetMap tiles.

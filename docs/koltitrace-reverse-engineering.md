@@ -83,12 +83,22 @@ mounted()
         │        (bo(env,id,prefix))
         │
         ├─ 2) Se 403 → repete o passo 1 com o padding do base64 invertido
-        │        (remove um "=" final, ou adiciona "==")
+        │        (remove TODOS os "=" finais, ou adiciona "==" se não houver)
         │
-        └─ 3) Se ainda falhar → GET {apiProduction}/api/qr-code/queue/distribution-geolocation?uid={id}
-                 com header Authorization: {token estático do config.js}
-                 (Pn(id) / handle403Error)
+        └─ 3) Qualquer falha restante → un(id):
+                 • se o id decodificado contém "transaction" → modal "Unable to read QR code"
+                 • senão → Pn(id): POST SEM CORPO em
+                     {api}/queue/distribution-geolocation?uid={id}
+                   com header Authorization (token estático do config.js),
+                   mostra o modal em tela cheia "Generating QR Code..." e
+                   IGNORA a resposta (erro só vai para console.log)
 ```
+
+> **Correção em relação à primeira versão deste documento:** o passo 3 não é um
+> `GET` que devolve dados. É um `POST` que **enfileira a geração** do arquivo do
+> lote (`Pn`, `Dt.post(url, null, {headers})`). A página nunca lê o resultado; o
+> usuário volta depois, quando o JSON já existe no S3. Descoberto ao executar o
+> clone e conferir `Pn` no bundle original.
 
 - `{env}` é escolhido comparando `window.location.origin` com os valores de
   `config.js`: `prod` em `qr.koltitrace.com`, `staging` em `qr-staging...`, e
@@ -99,6 +109,16 @@ mounted()
 - A tentativa de duas paddings diferentes de base64 (passo 2) sugere que a chave do
   objeto no S3 nem sempre corresponde exatamente ao padding que o front-end calcula
   a partir do id da URL — comportamento defensivo, não intencional.
+- O host do `POST` do passo 3 é escolhido pelo origin da página:
+  `apiProduction` em produção, `apiBastionStaging` em staging e
+  `apiBastionDevelopment` para qualquer outro origin (que hoje aponta para o mesmo
+  host de produção).
+- Qualquer erro na primeira tentativa (não só 403) acaba no passo 3. O retry de
+  padding só acontece em 403 — o que é o código que o S3 costuma devolver para uma
+  chave inexistente quando o bucket não concede `ListBucket` (inferência, não
+  observado na infraestrutura real).
+- `fetchGeo` e `fetchDistribution` passam pelo mesmo fluxo; se **ambos** os arquivos
+  faltam, uma única visita dispara **dois** `POST`s de enfileiramento.
 
 **Evidência:** `assets/HomeView.f7f14db3.js`, funções minificadas `Sn`, `bo`, `ut`,
 `dt`, `Pn`, `un`, `Tl`, e o store Pinia `vo = Rt("aws", {...})`.
@@ -148,19 +168,33 @@ chave. **Recomendação:** confirmar restrições no console do Google; girar a 
 se não houver restrição de referrer.
 
 ### F-2 — Token de exemplo do jwt.io usado como credencial de API (Médio)
-O header `Authorization` enviado para `apifg.koltitrace.com` é um valor estático,
-público, de uma ferramenta de terceiros, e já expirado desde 2023. Isso sugere uma
-das duas coisas:
-- a API de fallback não valida de fato esse token (qualquer bearer serve), ou
+O header `Authorization` enviado no `POST` de enfileiramento para
+`apifg.koltitrace.com` é um valor estático, público, de uma ferramenta de terceiros,
+e já expirado desde 2023. Isso sugere uma das duas coisas:
+- a API não valida de fato esse token (qualquer bearer serve), ou
 - o token nunca foi trocado por um real.
 Em qualquer caso, não há autenticação real protegendo esse endpoint do lado do
 cliente. **Recomendação:** a API deve emitir e validar tokens de verdade (ou não
 exigir nenhum, se o dado é deliberadamente público), e nunca reusar segredos de
 exemplo de terceiros.
 
+### F-2b — Visitar um link qualquer dispara escrita no backend (Médio, a confirmar)
+Pela lógica de `Pn`/`un` (confirmada no bundle e reproduzida no clone — cenários 2
+e 3 da seção 7), **carregar a página com um id inexistente** faz o navegador enviar
+um `POST /queue/distribution-geolocation?uid={id}` autenticado só pelo token
+estático da F-2, e uma única visita pode enviar **dois** (um para `Geo_`, outro para
+`Dist_`). Qualquer pessoa pode montar um link `/<base64 qualquer>` e provocar esse
+efeito, sem sessão e sem ser o dono do lote. Se o backend aceitar `uid` arbitrário,
+isso permite (a) encher a fila de geração com ids lixo, (b) disparar processamento
+para lotes de terceiros e (c) abuso de custo. **Não testado contra o backend real**
+— é inferência a partir do código do cliente. **Recomendação:** validar no servidor
+que o `uid` corresponde a um lote existente e autorizado antes de enfileirar; limitar
+a taxa por origem/IP; idealmente a geração não deveria ser disparável por uma leitura
+pública.
+
 ### F-3 — Dados de distribuição acessíveis só pelo id do lote, sem autenticação (Médio, a confirmar)
-Tanto o caminho primário (S3/CloudFront) quanto o fallback de API usam só o `id` da
-URL como chave de acesso ao JSON do lote. Esse `id` é texto em base64 **sem
+O caminho de leitura (S3/CloudFront) usa só o `id` da URL como chave de acesso ao
+JSON do lote (e o `POST` de enfileiramento, ver F-2b, também). Esse `id` é texto em base64 **sem
 assinatura, sem HMAC, sem nada que impeça adivinhação** — é só codificação, não
 controle de acesso. Quem souber (ou adivinhar) o padrão de nomenclatura dos lotes
 (`app-{N}-batch-koltitrace`) pode, em tese, montar outros ids e consultar outros
@@ -219,13 +253,46 @@ sessão.
 
 ---
 
-## 7. Artefatos desta análise
+## 7. Execução e observações
+
+O clone (`koltitrace-clone/`) foi servido localmente e executado em Chromium
+headless (Playwright), com as respostas de rede simuladas por interceptação
+(`page.route`) para forçar cada caminho do fluxo. **Isto verifica que o clone
+implementa a lógica extraída do bundle; não é observação do sistema real**, cujo
+comportamento só foi analisado estaticamente.
+
+| # | Cenário | Requisições observadas | Resultado na UI |
+|---|---|---|---|
+| 1 | Lote válido | `GET Geo_<id>` 200 → `GET Dist_<id>` 200 | Mapa com marcadores de origem e destino + JSON do lote |
+| 2 | `Dist_` devolve 403 (id com padding `==`) | `GET Geo_` 404 → **POST** queue → `GET Dist_<id>==` 403 → `GET Dist_<id>` (sem `=`) 403 → **POST** queue | "Generating QR Code..." |
+| 3 | Id inexistente (404 em tudo) | `GET Geo_` 404 → **POST** queue → `GET Dist_` 404 → **POST** queue | "Generating QR Code..." |
+| 4 | Id cujo texto contém `transaction` | `GET Geo_` 404, `GET Dist_` 404, nenhum POST | "Unable to read QR code" |
+| 5 | Rota desconhecida (`/#/`) | nenhuma | "Page not Found" |
+
+Observações do que a execução mostrou:
+
+- **O retry de padding só ocorre em 403** e remove *todos* os `=` finais (o
+  primeiro rascunho do clone removia só um — corrigido ao comparar com o bundle).
+- **O `POST` de enfileiramento sempre leva o header `Authorization`**, confirmado
+  no cenário 2 e 3 (header presente).
+- **Uma visita com id sem arquivo gera dois `POST`s** (cenários 2 e 3) — base da
+  F-2b.
+- **Id com `transaction` nunca chega ao `POST`**: o aviso substitui o fluxo de geração.
+- **A UI do original não lê o resultado do `POST`**: o estado final é sempre o modal
+  de geração; não há polling.
+- Nenhum erro de JavaScript em nenhum dos cenários.
+
+Limitação: a ordem exata entre o modal do `POST` e a resolução da segunda busca, e o
+tratamento do spinner no original quando `fetchGeo` rejeita, foram reproduzidos de
+forma equivalente, não idêntica ao milissegundo.
+
+## 8. Artefatos desta análise
 
 - `koltitrace-clone/` — reconstrução funcional do front-end (sem credenciais reais,
   sem chamadas às hosts reais; ver `koltitrace-clone/README.md`).
 - Este documento.
 
-## 8. Referências de evidência (REA)
+## 9. Referências de evidência (REA)
 
 - `rea analyze-javascript-application` sobre os arquivos públicos baixados de
   `qr.koltitrace.com` (HTML + `index.*.js`) — grafo de módulos/exports confirmando

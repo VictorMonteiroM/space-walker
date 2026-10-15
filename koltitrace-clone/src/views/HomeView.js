@@ -22,6 +22,7 @@ export const HomeView = {
       config,
       loading: true,
       errorMessage: null,
+      errorKind: null,
       showUnreadableQrNotice: false,
       distribution: null,
       map: null,
@@ -49,7 +50,11 @@ export const HomeView = {
       const { data } = await fetchDistribution(this.id);
       this.distribution = data?.data ?? null;
     } catch (err) {
-      this.errorMessage = config.missingDataMsg;
+      // "generating": the original POSTed a generation job and shows a
+      // full-screen "Generating QR Code..." notice; "unreadable": the id looks
+      // like a transaction QR. Anything else is a generic failure.
+      this.errorKind = err.kind ?? "missing";
+      this.errorMessage = err.kind ? err.message : config.missingDataMsg;
     } finally {
       this.loading = false;
     }
@@ -92,9 +97,14 @@ export const HomeView = {
 
       <div v-if="loading" id="spinner">{{ config.generateMsg }}</div>
 
-      <div v-else-if="errorMessage" class="alert">{{ errorMessage }}</div>
+      <div v-else-if="errorKind === 'generating'" class="alert">
+        <h4>Generating QR Code...</h4>
+        <p>{{ errorMessage }}</p>
+      </div>
 
-      <div v-else class="distribution">
+      <div v-else-if="errorKind === 'missing'" class="alert">{{ errorMessage }}</div>
+
+      <div v-else-if="!errorKind" class="distribution">
         <div ref="mapEl" class="map"></div>
         <pre class="distribution-json">{{ JSON.stringify(distribution, null, 2) }}</pre>
       </div>
